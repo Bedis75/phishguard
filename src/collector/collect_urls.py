@@ -1,10 +1,12 @@
-"""Collecte quotidienne des URL (étape 1 du collecteur live).
+"""Collecte des URL, 2 passages par jour (étape 1 du collecteur live).
+
+OpenPhish publie une nouvelle liste à 00:00 et 12:00 UTC : lancer vers 00:15 et 12:15 UTC.
 
 Usage (depuis la racine du repo) :
     python -m src.collector.collect_urls
     python -m src.collector.collect_urls --n-domains 100 --pages-per-domain 3
 
-Sortie : data/live/AAAA-MM-JJ/urls.csv
+Sortie : data/live/AAAA-MM-JJ/urls_HHMM.csv (date et heure UTC du passage)
     url, label, source, domain, tranco_rank, tranco_list_id, collected_at
 """
 
@@ -70,14 +72,14 @@ def main():
     parser.add_argument("--top-k", type=int, default=100_000,
                         help="tirer les domaines dans le top K Tranco (pas seulement les plus connus)")
     parser.add_argument("--workers", type=int, default=16)
-    parser.add_argument("--date", default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                        help="dossier de sortie (et graine du tirage)")
     args = parser.parse_args()
 
-    out_dir = LIVE_DIR / args.date
-    out_file = out_dir / "urls.csv"
+    run = datetime.now(timezone.utc)
+    run_date, run_time = run.strftime("%Y-%m-%d"), run.strftime("%H%M")
+    out_dir = LIVE_DIR / run_date
+    out_file = out_dir / f"urls_{run_time}.csv"
     if out_file.exists():
-        raise SystemExit(f"{out_file} existe déjà : collecte du jour déjà faite.")
+        raise SystemExit(f"{out_file} existe déjà.")
 
     session = new_session()
 
@@ -94,7 +96,7 @@ def main():
     list_id, ranking = fetch_tranco(session, LIVE_DIR / "tranco")
     legit, n_ok, n_tried = collect_legit(
         session, ranking, list_id, args.n_domains, args.pages_per_domain,
-        args.top_k, seed=args.date, workers=args.workers,
+        args.top_k, seed=f"{run_date}-{run_time}", workers=args.workers,
     )
     print(f"Tranco ({list_id}) : {len(legit)} pages internes "
           f"sur {n_ok} domaines ({n_tried} domaines essayés)")
