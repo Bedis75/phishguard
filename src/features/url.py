@@ -127,7 +127,7 @@ def url_features(url, history=None, ip=None):
     """Les 56 caractéristiques URL d'une URL, dans l'ordre de `URL_FEATURES`.
 
     history : liste des URL intermédiaires des redirections (None = page non chargée -> NaN).
-    ip      : adresse IP résolue du domaine (None = non résolue -> statistical_report selon l'URL seule, NaN si inconnu).
+    ip      : adresse IP résolue du domaine (None = pas tentée -> NaN ; "" = résolution échouée -> 2, comme les auteurs).
     """
     hostname = urlsplit(url).hostname or ""
     ext = _extract(url)
@@ -155,10 +155,12 @@ def url_features(url, history=None, ip=None):
         # Reproduit la fonction des auteurs : le `return` est dans la boucle -> seul le 1er saut compte
         nb_external_redirection = int(bool(history) and domain.lower() not in history[0].lower())
 
-    if STAT_URL_RE.search(url) or (ip and STAT_IP_RE.search(ip)):
-        statistical_report = 1
-    elif ip is None:
+    if ip is None:
         statistical_report = float("nan")
+    elif ip == "":
+        statistical_report = 2  # `except: return 2` des auteurs (échec DNS)
+    elif STAT_URL_RE.search(url) or STAT_IP_RE.search(ip):
+        statistical_report = 1
     else:
         statistical_report = 0
 

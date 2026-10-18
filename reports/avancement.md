@@ -337,6 +337,28 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Lecture :** les clusters correspondent à des **techniques d'attaque** reconnaissables (faux sous-domaines, sites compromis, IP, redirecteurs, formulaires), pas seulement à des sites. La campagne Apple ID forme à elle seule le cluster 0 ; les 3 campagnes multi-domaines de `03` n'ont pas été suivies séparément (doublons retirés en `04`).
 - **Usage SOC :** ajouter à l'alerte « ressemble au groupe *Sites compromis (WordPress)* » oriente l'analyste vers la bonne procédure (prévenir le propriétaire du site compromis, bloquer l'IP…).
 
+
+### 3.14 Cascade et interface (`src/predict.py`, `app/`)
+
+- **Contenu « au mieux » (option B) :** `src/features/content.py` reproduit `extract_data_from_URL` et `content_features.py` des auteurs, particularités comprises ; `nb_hyperlinks` suit leur version commentée (liens internes + externes) ; les 5 colonnes constantes valent 0 ; `ratio_extRedirection` et `ratio_extErrors` (une requête par lien) prennent la médiane du train (0,0).
+- **Contrôle de cohérence** sur les pages live du 18/10 (lecture du HTML, rien d'exécuté) — médianes :
+
+| Colonne | Hannousse légit. | Live légit. | Hannousse phishing | Live phishing (hors `pages.dev`) |
+| --- | --- | --- | --- | --- |
+| `nb_hyperlinks` | 83 | 82 | 14 | 35 |
+| `ratio_intHyperlinks` | 0,79 | 0,87 | 0,57 | 0,67 |
+| `domain_with_copyright` (moyenne) | 0,52 | 0,49 | 0,36 | 0,37 |
+| `external_favicon` (moyenne) | 0,54 | 0,48 | 0,35 | 0,58 |
+
+  → les **légitimes live ressemblent fortement à celles de Hannousse** : l'extraction est du bon ordre de grandeur. Le phishing live diffère davantage (dérive depuis 2020). `login_form` vaut toujours 0 sur le live (à surveiller).
+- **Cascade** (`src/predict.py`, classe `PhishGuard`) : téléchargement sécurisé → si page 200 + HTML avec au moins un lien : modèle URL + Contenu, sinon modèle URL seule → seuils du modèle utilisé (`thresholds.json`) → 3 raisons SHAP traduites en phrases (ce qui pousse vers phishing si alerte, ce qui rassure sinon) → famille d'attaque K-Means (branche contenu, si `models/kmeans_campaigns.joblib` existe).
+- **La cascade corrige la fausse alerte de `07` :** `scenari.software` passe de 0,83 (🟠, modèle URL + Contenu, « 0 lien ») à **0,14** (pas d'alerte) : la page vide est détectée et le modèle URL seule décide.
+- **Interface** (`app/streamlit_app.py`, lancée par `bash app/run.sh`) : saisie d'une URL → niveau 🔴/🟠/⚪, probabilité, modèle utilisé et pourquoi, seuils, 3 raisons, famille d'attaque, détails techniques (code HTTP, redirections, IP).
+- **Raisons des deux côtés (18/10, après essai de Bedis) :** au départ, sans alerte, l'interface n'affichait que ce qui rassure. Pour le faux PayPal (0,80, juste sous le seuil 0,86), elle montrait seulement « 3 tirets », « jeton de 8 caractères »… sans expliquer le 0,80. Elle affiche maintenant **toujours** les 3 raisons qui inquiètent et les 3 qui rassurent, plus le point de départ du modèle (probabilité moyenne 0,49). Faux PayPal : inquiète = 2 mots sensibles (+0,17), pas de `www` (+0,08), nom d'hôte de 38 caractères (+0,07) ; rassure = 3 tirets (−0,05), jetons de 8 caractères (−0,03).
+- **À expliquer à l'oral :** « 3 tirets » rassure le modèle parce que, dans Hannousse, beaucoup d'URL légitimes (titres d'articles) contiennent des tirets. **SHAP explique ce que le modèle a appris, pas la vérité** : c'est aussi ce qui permet de repérer ses biais.
+- **Sécurité de l'interface :** elle tourne **entièrement dans un conteneur** (`docker/app/`) : lecture seule, `--cap-drop ALL`, `no-new-privileges`, utilisateur non-root, 2 Go / 2 CPU, port publié **uniquement sur `127.0.0.1`** (inaccessible depuis le réseau), seuls `src/`, `app/`, `models/` et `allbrands.txt` montés **en lecture seule**. Mêmes protections de téléchargement que le collecteur (pas de JavaScript, blocage des adresses privées — vérifié : `192.168.1.1` bloquée).
+- **Versions figées** dans l'image (scikit-learn 1.9.1, numpy 2.4.6, pandas 3.0.6, shap 0.51.0…) : indispensable pour recharger les modèles `joblib`. Vérifié : mêmes résultats dans le conteneur que sur la machine.
+
 ---
 
 ## 4. Décisions méthodologiques (à défendre à l'oral)
@@ -387,9 +409,9 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | ✅ | ~~K-Means~~ : k = 8, 8 clusters décrits et nommés (§3.13) ; conclusion Markdown + commit de `09` à faire | Bedis | Analyse des campagnes. |
 | 4 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois, seuils 0,81 / 0,93 inclus), test live avec et sans `pages.dev`, McNemar, calibration | Bedis | Le résultat principal du rapport. |
 | 5 | Dérive (semaine 1 contre semaine 2) et évasion légère (2–3 transformations d'URL) | Bedis | Robustesse hors laboratoire (résultat préliminaire). |
-| 6 | Démo **Streamlit** | Claude | Présentation orale. |
+| ✅ | ~~Démo Streamlit~~ (`bash app/run.sh`, §3.14), essayée par Bedis le 18/10 (`github.com/login` : 0,50, pas d'alerte, branche URL + Contenu) | Claude | Présentation orale. |
 | 7 | **Rapport + présentation (28–31 oct.)** | Bedis | Livrables. |
-| 3 bis | **Cascade** : contenu approximatif (option B) dans le conteneur + bascule vers le modèle URL seule si contenu inutilisable | Claude (après `08`) | Utiliser le contenu quand il est disponible, sans en dépendre. |
+| ✅ | ~~Cascade + contenu approximatif~~ (§3.14) | Claude | Fait le 18/10. |
 
 **Reportés en « perspectives »** (hors délai) : Wazuh, FastAPI, Docker (déploiement), MLflow, collecteur étape 2 (WHOIS/DNS/TLS).
 
@@ -408,4 +430,6 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | Collecte | `bash src/collector/collect.sh` (URL + pages dans le conteneur ; identifiant Tranco enregistré dans chaque fichier) |
 | Caractéristiques live | `python -m src.features.build_live` (URL, validées 52/52 contre Hannousse) |
 | Seuils SOC | `notebooks/06_threshold.ipynb` (probabilités hors-pli sur le train) |
+| Modèles | `notebooks/08_live_model.ipynb` → `models/*.joblib` + `thresholds.json` ; `09_kmeans` → `models/kmeans_campaigns.joblib` |
+| Interface | `bash app/run.sh` → http://localhost:8501 (conteneur `docker/app/`) |
 | Historique | `git log` : un commit par étape |

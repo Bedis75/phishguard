@@ -80,9 +80,11 @@ def read_limited(resp):
     return b"".join(chunks)[:MAX_BYTES]
 
 
-def fetch(session, url, html_dir):
+def download(session, url):
+    """Télécharge une page en sécurité. Renvoie (infos, html) ; html = None si pas de page 200 + HTML."""
     row = dict.fromkeys(FIELDS, "")
     row.update(url=url, fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), ok=0)
+    body = None
 
     # IP du domaine enregistré, comme `statistical_report` des auteurs
     ext = _extract(url)
@@ -107,14 +109,23 @@ def fetch(session, url, html_dir):
                    history=json.dumps(history))
 
         if resp.status_code == 200 and ("html" in content_type or "text" in content_type or not content_type):
-            body = read_limited(resp)
-            if body.strip():
-                name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".html.gz"
-                (html_dir / name).write_bytes(gzip.compress(body))
-                row.update(ok=1, n_bytes=len(body), html_file=f"html/{name}")
+            data = read_limited(resp)
+            if data.strip():
+                body = data
+                row.update(ok=1, n_bytes=len(body))
         resp.close()
     except (requests.RequestException, BlockedAddress, ValueError) as exc:
         row.update(history=json.dumps(history), error=f"{type(exc).__name__}: {exc}"[:300])
+    return row, body
+
+
+def fetch(session, url, html_dir):
+    """Télécharge une page et enregistre son HTML compressé dans html_dir."""
+    row, body = download(session, url)
+    if body is not None:
+        name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".html.gz"
+        (html_dir / name).write_bytes(gzip.compress(body))
+        row["html_file"] = f"html/{name}"
     return row
 
 
