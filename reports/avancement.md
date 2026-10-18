@@ -356,6 +356,20 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Interface** (`app/streamlit_app.py`, lancée par `bash app/run.sh`) : saisie d'une URL → niveau 🔴/🟠/⚪, probabilité, modèle utilisé et pourquoi, seuils, 3 raisons, famille d'attaque, détails techniques (code HTTP, redirections, IP).
 - **Raisons des deux côtés (18/10, après essai de Bedis) :** au départ, sans alerte, l'interface n'affichait que ce qui rassure. Pour le faux PayPal (0,80, juste sous le seuil 0,86), elle montrait seulement « 3 tirets », « jeton de 8 caractères »… sans expliquer le 0,80. Elle affiche maintenant **toujours** les 3 raisons qui inquiètent et les 3 qui rassurent, plus le point de départ du modèle (probabilité moyenne 0,49). Faux PayPal : inquiète = 2 mots sensibles (+0,17), pas de `www` (+0,08), nom d'hôte de 38 caractères (+0,07) ; rassure = 3 tirets (−0,05), jetons de 8 caractères (−0,03).
 - **À expliquer à l'oral :** « 3 tirets » rassure le modèle parce que, dans Hannousse, beaucoup d'URL légitimes (titres d'articles) contiennent des tirets. **SHAP explique ce que le modèle a appris, pas la vérité** : c'est aussi ce qui permet de repérer ses biais.
+- **Fausse alerte réelle trouvée par Bedis (18/10) :** `https://bpas-etudiant-oouc.rnu.tn/login/`, page de connexion **légitime** d'une plateforme universitaire tunisienne (`rnu.tn` = Réseau National Universitaire) → **🟠 À REVOIR, 0,85** (branche URL + Contenu). Raisons : mot `login` dans l'URL (+0,15), pas de `www` (+0,09), seulement 30 liens (+0,06).
+  - **Pourquoi :** une vraie page de connexion ressemble, par construction, à une page de phishing (mot `login`, page sobre avec peu de liens, formulaire). Les légitimes de Hannousse sont surtout des pages de contenu (articles, wikis) et très peu de pages de connexion ; les domaines `.tn` y sont rares → **biais d'échantillonnage** (type de page et géographie).
+  - **Ce que fait le système :** la page n'est **pas bloquée** (niveau 🟠, pas 🔴) ; les raisons affichées permettent à l'analyste de comprendre l'erreur en quelques secondes.
+  - **Deuxième cas, même mécanisme :** `https://um.uvt.tn/login/index.php?loginredirect=1` (plateforme Moodle de l'Université Virtuelle de Tunis, légitime) → **0,74, pas d'alerte** (branche URL + Contenu). Inquiète : 2 fois `login` (+0,12), **3 liens seulement** (+0,08), pas de `www` (+0,06). Sous le seuil 0,81 : le seuil SOC évite l'alerte, de peu.
+  - **Tests manuels dans l'interface (18/10) :**
+
+| URL | Statut réel | Branche | Probabilité | Niveau |
+| --- | --- | --- | --- | --- |
+| `https://github.com/login` | légitime | URL + Contenu | 0,50 | ⚪ |
+| `http://paypal-secure-login.verify-account.xyz/signin/update.php?id=8a3f9c2e` (inventée, DNS inexistant) | phishing (fictif) | URL seule | 0,80 | ⚪ (seuil 0,86) |
+| `https://bpas-etudiant-oouc.rnu.tn/login/` | légitime | URL + Contenu | 0,85 | 🟠 fausse alerte |
+| `https://um.uvt.tn/login/index.php?loginredirect=1` | légitime | URL + Contenu | 0,74 | ⚪ |
+
+  - **Réponse SOC classique (perspective, non appliquée avant l'évaluation finale) :** une **liste d'autorisation** des domaines de l'organisation (ex. `*.rnu.tn` pour une université tunisienne) appliquée avant le modèle. Le modèle n'est **pas** modifié pour corriger cet exemple : ce serait ajuster le système sur un cas observé.
 - **Sécurité de l'interface :** elle tourne **entièrement dans un conteneur** (`docker/app/`) : lecture seule, `--cap-drop ALL`, `no-new-privileges`, utilisateur non-root, 2 Go / 2 CPU, port publié **uniquement sur `127.0.0.1`** (inaccessible depuis le réseau), seuls `src/`, `app/`, `models/` et `allbrands.txt` montés **en lecture seule**. Mêmes protections de téléchargement que le collecteur (pas de JavaScript, blocage des adresses privées — vérifié : `192.168.1.1` bloquée).
 - **Versions figées** dans l'image (scikit-learn 1.9.1, numpy 2.4.6, pandas 3.0.6, shap 0.51.0…) : indispensable pour recharger les modèles `joblib`. Vérifié : mêmes résultats dans le conteneur que sur la machine.
 
@@ -391,6 +405,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Traçabilité de Hannousse :** pour quelques URL, les caractéristiques ne correspondent pas exactement à l'URL stockée.
 - **Code de Hannousse :** le code de contenu publié ne correspond pas au CSV, 5 colonnes de contenu sont constantes, `random_domain` n'est pas reproductible.
 - **Pages rendues en JavaScript :** elles paraissent vides (0 lien) et poussent vers « phishing » → fausses alertes possibles sur des sites légitimes modernes (ex. `scenari.software`, 0,83).
+- **Pages de connexion légitimes :** elles ressemblent au phishing (mot `login`, page sobre) et sont rares dans les légitimes de Hannousse ; ex. `bpas-etudiant-oouc.rnu.tn/login/` → 0,85 (🟠). Domaines `.tn` peu représentés.
 - **Une campagne domine le live :** 45 % du phishing collecté est sur `pages.dev`, rendu en JavaScript (couche contenu aveugle sans navigateur).
 - **Point de fonctionnement SOC :** rappel de 0,61 seulement à 1 % de faux positifs ; précision de 0,40 à prévalence réelle avec ce seuil.
 
