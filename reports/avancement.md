@@ -303,6 +303,40 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
   - le faux PayPal (0,80) reste **sous le seuil de revue (0,86)** : un phishing évident pour un humain ne déclencherait pas d'alerte avec l'URL seule. Le modèle, appris sur des URL de 2020, est prudent ; le prix de 1 % de faux positifs est un rappel d'environ 50 %.
 - **Modèles sauvegardés** (`models/`, entraînés sur tout le train) : `rf_url_content.joblib` (79 colonnes) et `rf_url.joblib` (52 colonnes), fichiers binaires non versionnés (`models/*.joblib` dans `.gitignore`). `models/thresholds.json` (versionné) contient pour chaque modèle **la liste exacte de ses colonnes** et ses seuils : URL + Contenu 0,81 / 0,933 ; URL seule 0,862 / 0,979.
 
+
+### 3.13 `09_kmeans` — Campagnes de phishing
+
+- **Fait :** K-Means sur les **4 432 URL de phishing** du train, 79 colonnes du modèle principal (lues dans `thresholds.json`), normalisées (`StandardScaler`), `n_init=10`, k de 2 à 12.
+- **Pourquoi :** regrouper les URL d'une même campagne (même kit, même attaquant) ; pour un SOC, « 1 campagne, 50 URL » plutôt que 50 alertes isolées.
+- **Coude et silhouette :** aucun coude net ; silhouette très basse (0,22 à k = 2, puis 0,06–0,10) → **le phishing ne forme pas de groupes bien séparés** dans cet espace (campagnes de tailles très différentes, qui se recouvrent).
+- **Piège du k = 2 :** meilleure silhouette, mais il sépare seulement les URL longues avec paramètres (`=`, `?`, `&`, IP ; 946 URL) des autres (3 486) : une forme d'URL, pas une campagne.
+- **Validation externe par les campagnes connues :** pour chaque site de phishing d'au moins 10 URL (20 sites, ex. `duilawyeryork.com`), part de ses URL dans un même cluster (la colonne `group` n'est pas utilisée par K-Means).
+
+| k | Silhouette | Pureté moyenne des campagnes | Tailles des clusters |
+| --- | --- | --- | --- |
+| 2 | 0,224 | 0,948 | 3 486 / 946 |
+| 4 | 0,081 | 0,879 | 2 332 / 1 181 / 491 / 428 |
+| 6 | 0,085 | 0,852 | 1 547 … 68 |
+| **8** | 0,091 | **0,844** | 1 466 / 921 / 874 / 427 / 376 / 228 / 78 / 62 |
+| 10 | 0,101 | 0,811 | 1 481 … 15 |
+
+- **Choix : k = 8.** Pureté presque égale à k = 6 (0,844 contre 0,852) avec des groupes plus fins, et pas de cluster minuscule (le plus petit fait 62 URL) ; à k = 10, la pureté baisse et un cluster de 15 URL apparaît. Les campagnes connues restent groupées à 84 % ; `duilawyeryork.com` (331 URL) tombe entièrement dans un seul cluster.
+- **Les 8 clusters, nommés à la main** (centres en écarts-types par rapport à la moyenne du phishing) :
+
+| Cluster | URL | Ce qui le définit | Sites / exemples | Nom proposé |
+| --- | --- | --- | --- | --- |
+| 0 | 376 | TLD dans le sous-domaine (+2,6), nom d'hôte long, « com » répété | `support-appleld.com.secureupdate.duilawyeryork.com` (331 URL) | **Faux sous-domaines de marque** (campagne Apple ID) |
+| 1 | 921 | Liens et favicon externes, nom de marque comme domaine | `google.com` (110), `blogspot`, `appspot`, `my-free.website`, `dropbox.com`, `kisa.link` | **Plateformes gratuites et services légitimes détournés** |
+| 2 | 874 | Titre vide (+1,7), peu de liens internes | `firebaseapp.com`, dossiers cachés sur sites compromis | **Pages minimalistes sans titre** |
+| 3 | 427 | URL longues, beaucoup de `=` et `?` | `…/index.php?email=…`, redirecteurs (`api…/redirect?…`), `office.com` | **URL à paramètres / redirecteurs** |
+| 4 | 228 | **Formulaire de connexion** (+4,0), CSS externes | `justlookapp.com`, `impotspublicservice.com` | **Pages de vol d'identifiants** |
+| 5 | 78 | Chiffres dans l'hôte (+5,5), `statistical_report` (+4,2), redirection externe | `http://216.83.55.154/…`, `http://157.240.2.20/` | **Hébergement sur adresse IP** |
+| 6 | 1 466 | Liens et médias internes (gabarit du site hôte) | `wp-content/`, `wp-includes/`, `shadetreetechnology.com/V4/validation/…` | **Sites compromis (WordPress)** |
+| 7 | 62 | Mots très longs (+6,6) | `chromeproxy.net/direct/aHR0cHM6Ly…` (base64 de `https://`), `?realm=…` | **Jetons encodés / proxys de redirection** |
+
+- **Lecture :** les clusters correspondent à des **techniques d'attaque** reconnaissables (faux sous-domaines, sites compromis, IP, redirecteurs, formulaires), pas seulement à des sites. La campagne Apple ID forme à elle seule le cluster 0 ; les 3 campagnes multi-domaines de `03` n'ont pas été suivies séparément (doublons retirés en `04`).
+- **Usage SOC :** ajouter à l'alerte « ressemble au groupe *Sites compromis (WordPress)* » oriente l'analyste vers la bonne procédure (prévenir le propriétaire du site compromis, bloquer l'IP…).
+
 ---
 
 ## 4. Décisions méthodologiques (à défendre à l'oral)
@@ -350,7 +384,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | ✅ | ~~Contenu pour le live~~ | Claude | Analysé : non reproductible → option A (§3.9). |
 | ✅ | ~~SHAP~~ : importance globale, 3 raisons par alerte, phrases + niveau d'alerte (§3.11) ; conclusion Markdown + commit de `07` à faire | Bedis | Rendre une alerte exploitable par un analyste (explicabilité). |
 | ✅ | ~~Modèle live URL seule + seuils, modèles sauvegardés dans `models/`~~ (§3.12) | Bedis | Nécessaire pour la cascade et l'interface. |
-| 3 | **K-Means** sur le phishing (campagnes, ex. `hf*.com`, `pages.dev`) | Bedis | Analyse des campagnes. |
+| ✅ | ~~K-Means~~ : k = 8, 8 clusters décrits et nommés (§3.13) ; conclusion Markdown + commit de `09` à faire | Bedis | Analyse des campagnes. |
 | 4 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois, seuils 0,81 / 0,93 inclus), test live avec et sans `pages.dev`, McNemar, calibration | Bedis | Le résultat principal du rapport. |
 | 5 | Dérive (semaine 1 contre semaine 2) et évasion légère (2–3 transformations d'URL) | Bedis | Robustesse hors laboratoire (résultat préliminaire). |
 | 6 | Démo **Streamlit** | Claude | Présentation orale. |
