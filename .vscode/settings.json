@@ -1,0 +1,16 @@
+{
+  "files.watcherExclude": {
+    "**/data/**": true,
+    "**/models/*.joblib": true,
+    "**/__pycache__/**": true
+  },
+  "search.exclude": {
+    "**/data/**": true,
+    "**/models/*.joblib": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true
+  },
+  "python.defaultInterpreterPath": "/home/bedis/miniconda3/envs/phishguard/bin/python",
+  "jupyter.notebookFileRoot": "${fileDirname}"
+}

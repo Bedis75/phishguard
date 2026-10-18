@@ -448,4 +448,6 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | Seuils SOC | `notebooks/06_threshold.ipynb` (probabilités hors-pli sur le train) |
 | Modèles | `notebooks/08_live_model.ipynb` → `models/*.joblib` + `thresholds.json` ; `09_kmeans` → `models/kmeans_campaigns.joblib` |
 | Interface | `bash app/run.sh` → http://localhost:8501 (conteneur `docker/app/`) |
+| Notebooks | Chacun a un titre, un objectif, des sections numérotées, un résultat Markdown après chaque sortie et une conclusion (18/10) |
+| Présentation du projet | `README.md` : résultats clés, schéma de la cascade, structure, installation, utilisation, sécurité, limites, références |
 | Historique | `git log` : un commit par étape |
