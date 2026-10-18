@@ -1,6 +1,6 @@
 # PhishGuard — Journal d'avancement
 
-*Mis à jour le 18 octobre 2026. Date limite du projet : 1er novembre 2026.*
+*Mis à jour le 18 octobre 2026 (soir). Date limite du projet : 1er novembre 2026.*
 
 Ce document résume ce qui a été fait, pourquoi, avec quels résultats, et ce qui reste à faire. Tous les chiffres viennent des notebooks `01` à `05` et des scripts de `src/`.
 
@@ -170,6 +170,70 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
   - `statistical_report` : nécessite une requête DNS.
 - `python -m src.features.build_live` → `data/processed/live_url.csv` : **4 742 URL uniques** (2 400 phishing, 2 342 légitimes).
 
+### 3.8 Collecteur live — étape 3 : pages HTML dans un conteneur isolé
+
+- **Fait :** `bash src/collector/collect.sh` enchaîne l'étape 1 (listes d'URL) et l'étape 3 : `src/collector/fetch_pages.py` télécharge le HTML **dans un conteneur Docker** (`docker/fetcher/`).
+- **Mêmes conditions que les auteurs de Hannousse :** `requests`, délai de 5 s, identifiant `python-requests`, seules les réponses 200 sont gardées.
+- **Sécurité :**
+
+| Protection | Effet |
+| --- | --- |
+| `requests` uniquement | Aucun JavaScript exécuté, aucun formulaire envoyé |
+| Redirections suivies à la main | Refusées vers une adresse privée ou locale (box, réseau local) — testé sur `127.0.0.1`, `localhost`, `192.168.1.1` |
+| Texte/HTML seulement, 2 Mo max | Pas de fichiers exécutables |
+| HTML stocké en `.gz` | Ne peut pas s'ouvrir par un double-clic |
+| Conteneur `--read-only`, `--cap-drop ALL`, `no-new-privileges`, utilisateur non-root, 1 Go / 2 CPU | Aucun privilège ; seul le dossier du jour est accessible en écriture |
+
+- **Sortie :** `pages_HHMM.csv` (statut, URL finale, redirections, IP, erreur) + `html/*.html.gz`.
+- **Première collecte complète (18/10, 14:35 UTC) :**
+
+| | Légitimes | Phishing |
+| --- | --- | --- |
+| Pages téléchargées | 246 / 294 (84 %) | 188 / 300 (63 %) |
+| Avec au moins une redirection | 6 % | **33 %** |
+| Taille médiane | ~100 Ko | **715 octets** |
+| Redirections bloquées | 0 | 0 |
+
+- **Découverte : une campagne domine les données live.** 183 des 300 URL de phishing de cette collecte (et **1 078 / 2 400, soit 45 %**, sur toutes les collectes) sont sur `pages.dev`, avec la même page « Meta for Business | Page Appeal ». 84 répondent 403 ; les autres renvoient une **coquille JavaScript vide** de 715 octets, sans contenu visible sans navigateur.
+- **Conséquences :** présenter les résultats live **avec et sans `pages.dev`** ; la couche contenu est aveugle sur ces pages ; c'est une **dérive** par rapport à 2020 (kits en JavaScript sur hébergeurs gratuits).
+
+### 3.9 Couche contenu en live : non reproductible
+
+- **Constat en lisant le code des auteurs :**
+  - le code publié **n'est pas celui qui a produit le CSV** (`nb_hyperlinks(dom)` prend 1 argument mais est appelé avec 6 : il aurait planté) ;
+  - **5 colonnes de contenu sont constantes (toujours 0)** dans Hannousse, à cause de bugs : `ratio_nullHyperlinks`, `ratio_intRedirection`, `ratio_intErrors`, `submit_email`, `sfh`. La couche « 24 caractéristiques » n'en a que **19 utiles** ;
+  - `ratio_extRedirection` et `ratio_extErrors` envoient une requête vers **chaque** lien externe de la page (et `ratio_extRedirection` monte à 2,0 pour un ratio : médias externes comptés deux fois) ;
+  - ~45 % du phishing live est rendu en JavaScript.
+- **Décision (option A) :** le test live porte sur la **couche URL seule**, dont la reproductibilité est prouvée (52/52). La couche contenu est évaluée **sur Hannousse uniquement**. Une version approximative du contenu en live (option B) reste possible s'il reste du temps.
+- **Modèle URL pur** (52 colonnes, sans `random_domain`, `nb_redirection`, `nb_external_redirection`, `statistical_report`) : F1 **0,876**, ROC-AUC 0,951, rappel à 1 % de FP 0,535 (validation croisée groupée, train).
+
+### 3.10 `06_threshold` — Point de fonctionnement pour un SOC
+
+- **Modèle :** RF sur URL + Contenu **sans `random_domain`** → F1 **0,9174** (contre 0,9168 avec) : la retirer ne coûte rien. ROC-AUC 0,973.
+- **Méthode :** probabilités **hors-pli** (`cross_val_predict`, `GroupKFold`) pour les 9 003 URL du train ; tous les seuils étudiés sans toucher au test.
+- **Pourquoi :** un SOC raisonne en **taux de faux positifs** (fatigue d'alerte) et en **précision à prévalence réelle** (~1 % de phishing), pas en F1 sur un jeu 50/50.
+
+| Seuil | Rappel | Faux positifs | Précision si 50 % de phishing | **Précision si 1 %** |
+| --- | --- | --- | --- | --- |
+| 0,5 (défaut) | 0,916 | 7,85 % | 0,92 | **0,11** |
+| 0,58 | 0,881 | 4,97 % | 0,95 | 0,15 |
+| **0,81** | **0,611** | **0,92 %** | 0,99 | **0,40** |
+| 0,933 | 0,312 | 0,09 % | 1,00 | 0,78 |
+
+- **Résultats clés :**
+  - au seuil 0,5, en conditions réelles, **89 % des alertes seraient fausses** (théorème de Bayes : le phishing est rare) ;
+  - **un F1 de 0,917 en laboratoire correspond à un rappel de 0,61 à 1 % de faux positifs** ;
+  - aucun seuil unique ne satisfait à la fois l'analyste et la sécurité.
+- **Décision : tri à deux niveaux** (fixé sur le train, appliqué tel quel au test) :
+
+| Probabilité | Action |
+| --- | --- |
+| ≥ 0,93 | Alerte haute (blocage automatique possible) : 31 % du phishing, 78 % des alertes justes à 1 % de prévalence |
+| 0,81 – 0,93 | File de revue par un analyste |
+| < 0,81 | Pas d'alerte |
+
+→ 61 % du phishing remonté pour moins de 1 % de faux positifs. Ces niveaux correspondent aux gravités d'une alerte SIEM (Wazuh, en perspectives).
+
 ---
 
 ## 4. Décisions méthodologiques (à défendre à l'oral)
@@ -185,6 +249,11 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | Prétraitement dans le `Pipeline` | Médiane et normalisation apprises sur les plis d'entraînement seulement (pas de fuite). |
 | Chiffre de référence sans la couche externe | Elle mesure la popularité, dépend de services disparus (Alexa) et du biais de sélection des légitimes. |
 | Modèle le plus simple à performance égale | Le stacking n'apporte rien : rasoir d'Ockham. |
+| Retirer `random_domain` | Non reproductible en live (module des auteurs non publié), non informatif ; F1 inchangé (0,9174). |
+| Reproduire le code des auteurs à l'identique, bugs compris | Éviter que le modèle reçoive en live des valeurs calculées autrement qu'à l'entraînement (*training-serving skew*). |
+| Test live sur la couche URL seule | Seule couche dont la reproductibilité est prouvée (52/52) ; le contenu n'est pas reproductible (code incohérent, colonnes constantes, rendu JavaScript). |
+| Seuil choisi pour un SOC, pas 0,5 | Au seuil 0,5, 89 % des alertes seraient fausses à prévalence réelle ; tri à deux niveaux (0,81 / 0,93). |
+| Collecte des pages dans un conteneur isolé | Les pages de phishing sont de vrais sites malveillants. |
 
 ---
 
@@ -195,6 +264,9 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Hannousse date de 2020** : la dérive vers 2026 n'est mesurable que sur la collecte live.
 - **Collecte live :** cloaking, pages en JavaScript, sites qui disparaissent vite ; un jour de collecte manqué (16/10) ; Tranco contient aussi des sites pour adultes et de piratage (légitimes au sens « non-phishing »).
 - **Traçabilité de Hannousse :** pour quelques URL, les caractéristiques ne correspondent pas exactement à l'URL stockée.
+- **Code de Hannousse :** le code de contenu publié ne correspond pas au CSV, 5 colonnes de contenu sont constantes, `random_domain` n'est pas reproductible.
+- **Une campagne domine le live :** 45 % du phishing collecté est sur `pages.dev`, rendu en JavaScript (couche contenu aveugle sans navigateur).
+- **Point de fonctionnement SOC :** rappel de 0,61 seulement à 1 % de faux positifs ; précision de 0,40 à prévalence réelle avec ce seuil.
 
 ---
 
@@ -202,19 +274,22 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 
 | Priorité | Tâche | Qui | Pourquoi |
 | --- | --- | --- | --- |
-| 1 | **Collecteur étape 3** : HTML brut, redirections et IP, dans un **conteneur Docker isolé** | Claude (plan de sécurité validé d'abord) | Le modèle retenu a besoin du contenu ; les pages de phishing disparaissent en quelques heures. |
-| 2 | **Seuil SOC** : rappel à 1 % de faux positifs, par validation croisée sur le train | Bedis | Le seuil 0,5 n'est pas adapté à un SOC. |
-| 3 | Retirer `random_domain` du modèle final | Bedis | Non reproductible en live, non informatif. |
-| 4 | Caractéristiques de **contenu** pour le live (24 colonnes, même méthode de validation) | Claude | Tester URL + Contenu en conditions réelles. |
-| 5 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois), test live, McNemar, calibration | Bedis | Le résultat principal du rapport. |
-| 6 | **SHAP** (3 raisons par verdict) et **K-Means** (campagnes, ex. `hf*.com`) | Bedis | Explicabilité et analyse des campagnes. |
-| 7 | Dérive (semaine 1 contre semaine 2) et évasion légère (2–3 transformations d'URL) | Bedis | Robustesse hors laboratoire (résultat préliminaire). |
-| 8 | Démo **Streamlit** | Claude | Présentation orale. |
-| 9 | **Rapport + présentation (28–31 oct.)** | Bedis | Livrables. |
+| ✅ | ~~Collecteur étape 3 (HTML dans Docker)~~ | Claude | Fait le 18/10 (§3.8). |
+| ✅ | ~~Seuil SOC~~ | Bedis | Fait le 18/10 (§3.10) ; conclusion Markdown + commit de `06` à faire. |
+| ✅ | ~~Retirer `random_domain`~~ | Bedis | Fait dans `06` (F1 inchangé). |
+| ✅ | ~~Contenu pour le live~~ | Claude | Analysé : non reproductible → option A (§3.9). |
+| 1 | **SHAP** : 3 raisons par verdict (modèle principal URL + Contenu) | Bedis | Rendre une alerte exploitable par un analyste (explicabilité). |
+| 2 | **Modèle live** : RF sur les 52 colonnes URL pures, seuils SOC recalculés de la même façon | Bedis | Le test live porte sur la couche URL. |
+| 3 | **K-Means** sur le phishing (campagnes, ex. `hf*.com`, `pages.dev`) | Bedis | Analyse des campagnes. |
+| 4 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois, seuils 0,81 / 0,93 inclus), test live avec et sans `pages.dev`, McNemar, calibration | Bedis | Le résultat principal du rapport. |
+| 5 | Dérive (semaine 1 contre semaine 2) et évasion légère (2–3 transformations d'URL) | Bedis | Robustesse hors laboratoire (résultat préliminaire). |
+| 6 | Démo **Streamlit** | Claude | Présentation orale. |
+| 7 | **Rapport + présentation (28–31 oct.)** | Bedis | Livrables. |
+| option | Contenu approximatif en live (option B) | Claude | Seulement s'il reste du temps. |
 
 **Reportés en « perspectives »** (hors délai) : Wazuh, FastAPI, Docker (déploiement), MLflow, collecteur étape 2 (WHOIS/DNS/TLS).
 
-**Collecte :** continuer deux fois par jour jusqu'au 27 octobre au moins.
+**Collecte :** continuer deux fois par jour jusqu'au 27 octobre au moins, avec `bash src/collector/collect.sh` (Docker Desktop ouvert).
 
 ---
 
@@ -226,6 +301,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | Données brutes | `data/raw/` (non versionné) ; Hannousse v3, SHA-256 vérifié |
 | Découpage | `notebooks/04_split.ipynb` → `data/processed/train.csv`, `test_LOCKED.csv` (SHA-256 ci-dessus) |
 | Graine aléatoire | `random_state=42` partout |
-| Collecte | `python -m src.collector.collect_urls` (identifiant Tranco enregistré dans chaque fichier) |
-| Caractéristiques live | `python -m src.features.build_live` |
+| Collecte | `bash src/collector/collect.sh` (URL + pages dans le conteneur ; identifiant Tranco enregistré dans chaque fichier) |
+| Caractéristiques live | `python -m src.features.build_live` (URL, validées 52/52 contre Hannousse) |
+| Seuils SOC | `notebooks/06_threshold.ipynb` (probabilités hors-pli sur le train) |
 | Historique | `git log` : un commit par étape |
