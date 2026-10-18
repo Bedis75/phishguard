@@ -205,6 +205,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
   - `ratio_extRedirection` et `ratio_extErrors` envoient une requête vers **chaque** lien externe de la page (et `ratio_extRedirection` monte à 2,0 pour un ratio : médias externes comptés deux fois) ;
   - ~45 % du phishing live est rendu en JavaScript.
 - **Décision (option A) :** le test live porte sur la **couche URL seule**, dont la reproductibilité est prouvée (52/52). La couche contenu est évaluée **sur Hannousse uniquement**. Une version approximative du contenu en live (option B) reste possible s'il reste du temps.
+- **Décision complémentaire (18/10, proposée par Bedis) : modèle en cascade.** Pour une URL nouvelle (interface, live), la page est téléchargée dans le conteneur et le contenu calculé « au mieux » (option B). **Si le contenu pose problème, on bascule sur le modèle URL seule.** Contenu jugé inutilisable si : téléchargement échoué (erreur, code ≠ 200, pas de HTML) ou page « vide » (aucun lien, typique d'une page rendue en JavaScript). L'alerte indique quel modèle a décidé. La règle de bascule ne dépend que du téléchargement, jamais de l'étiquette : elle peut être appliquée telle quelle au test live.
 - **Modèle URL pur** (52 colonnes, sans `random_domain`, `nb_redirection`, `nb_external_redirection`, `statistical_report`) : F1 **0,876**, ROC-AUC 0,951, rappel à 1 % de FP 0,535 (validation croisée groupée, train).
 
 ### 3.10 `06_threshold` — Point de fonctionnement pour un SOC
@@ -277,6 +278,31 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Amélioration possible :** deux raisons peuvent dire la même chose (`longest_word_path` et `longest_words_raw`) ; regrouper les caractéristiques corrélées donnerait 3 raisons vraiment distinctes.
 - **Enseignement :** la fausse alerte vient du même mécanisme que la campagne `pages.dev` : une page **rendue en JavaScript** paraît vide pour `requests`, et « page vide » ressemble à du phishing. Les sites légitimes modernes (applications JavaScript) risquent donc des fausses alertes → limite à documenter.
 
+
+### 3.12 `08_live_model` — Modèle URL seule (branche de secours de la cascade, test live)
+
+- **Fait :** RF sur les **52 colonnes purement URL** (`URL_ONLY` = colonnes de `src/features/url.py` sans `random_domain`, `nb_redirection`, `nb_external_redirection`, `statistical_report`). Fonction `test_url(url)` : calcule les caractéristiques **à partir du texte de l'URL** (aucune visite du site) et renvoie la probabilité.
+- **Exemples (modèle entraîné sur tout le train) :** `google.com/search` 0,06 ; `fr.wikipedia.org/wiki/…` 0,15 ; faux PayPal `paypal-secure-login.verify-account.xyz/signin/update.php?id=…` 0,80 ; faux Apple ID `secure-appleid.com.account-verify.top/login` 0,89.
+- **Seuils SOC** (probabilités hors-pli, même méthode qu'en `06`) — F1 0,876, ROC-AUC 0,951 :
+
+| FP max | Seuil | Rappel | FP réel | Précision si 1 % de phishing |
+| --- | --- | --- | --- | --- |
+| 0,1 % | 0,979 | 0,123 | 0,09 % | 0,59 |
+| 1 % | 0,862 | 0,535 | 0,96 % | 0,36 |
+| 5 % | 0,663 | 0,791 | 4,97 % | 0,14 |
+
+- **Comparaison des deux branches de la cascade (même politique d'alerte) :**
+
+| Modèle | Seuil « à revoir » (1 % FP) | Rappel à 1 % FP | Seuil « alerte haute » (0,1 % FP) | Rappel à 0,1 % FP |
+| --- | --- | --- | --- | --- |
+| URL + Contenu | 0,81 | **0,611** | 0,93 | **0,312** |
+| URL seule | 0,86 | 0,535 | 0,98 | 0,123 |
+
+- **Lecture :**
+  - au point de fonctionnement SOC, le contenu apporte **+7,6 points de rappel à 1 % de FP** et **2,5 fois plus de rappel à 0,1 %** : son apport est **plus grand qu'en F1** (+4 points) ;
+  - le faux PayPal (0,80) reste **sous le seuil de revue (0,86)** : un phishing évident pour un humain ne déclencherait pas d'alerte avec l'URL seule. Le modèle, appris sur des URL de 2020, est prudent ; le prix de 1 % de faux positifs est un rappel d'environ 50 %.
+- **Modèles sauvegardés** (`models/`, entraînés sur tout le train) : `rf_url_content.joblib` (79 colonnes) et `rf_url.joblib` (52 colonnes), fichiers binaires non versionnés (`models/*.joblib` dans `.gitignore`). `models/thresholds.json` (versionné) contient pour chaque modèle **la liste exacte de ses colonnes** et ses seuils : URL + Contenu 0,81 / 0,933 ; URL seule 0,862 / 0,979.
+
 ---
 
 ## 4. Décisions méthodologiques (à défendre à l'oral)
@@ -323,13 +349,13 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | ✅ | ~~Retirer `random_domain`~~ | Bedis | Fait dans `06` (F1 inchangé). |
 | ✅ | ~~Contenu pour le live~~ | Claude | Analysé : non reproductible → option A (§3.9). |
 | ✅ | ~~SHAP~~ : importance globale, 3 raisons par alerte, phrases + niveau d'alerte (§3.11) ; conclusion Markdown + commit de `07` à faire | Bedis | Rendre une alerte exploitable par un analyste (explicabilité). |
-| 2 | **Modèle live** : RF sur les 52 colonnes URL pures, seuils SOC recalculés de la même façon | Bedis | Le test live porte sur la couche URL. |
+| ✅ | ~~Modèle live URL seule + seuils, modèles sauvegardés dans `models/`~~ (§3.12) | Bedis | Nécessaire pour la cascade et l'interface. |
 | 3 | **K-Means** sur le phishing (campagnes, ex. `hf*.com`, `pages.dev`) | Bedis | Analyse des campagnes. |
 | 4 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois, seuils 0,81 / 0,93 inclus), test live avec et sans `pages.dev`, McNemar, calibration | Bedis | Le résultat principal du rapport. |
 | 5 | Dérive (semaine 1 contre semaine 2) et évasion légère (2–3 transformations d'URL) | Bedis | Robustesse hors laboratoire (résultat préliminaire). |
 | 6 | Démo **Streamlit** | Claude | Présentation orale. |
 | 7 | **Rapport + présentation (28–31 oct.)** | Bedis | Livrables. |
-| option | Contenu approximatif en live (option B) | Claude | Seulement s'il reste du temps. |
+| 3 bis | **Cascade** : contenu approximatif (option B) dans le conteneur + bascule vers le modèle URL seule si contenu inutilisable | Claude (après `08`) | Utiliser le contenu quand il est disponible, sans en dépendre. |
 
 **Reportés en « perspectives »** (hors délai) : Wazuh, FastAPI, Docker (déploiement), MLflow, collecteur étape 2 (WHOIS/DNS/TLS).
 

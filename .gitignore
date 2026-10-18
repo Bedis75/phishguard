@@ -218,3 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 data/
 CLAUDE.md
+
+# Modèles entraînés (lourds) : jamais dans Git. Les seuils (JSON) restent versionnés.
+models/*.joblib
