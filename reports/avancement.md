@@ -234,6 +234,49 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 
 → 61 % du phishing remonté pour moins de 1 % de faux positifs. Ces niveaux correspondent aux gravités d'une alerte SIEM (Wazuh, en perspectives).
 
+### 3.11 `07_shap` — Explicabilité
+
+- **Fait :** `shap==0.51.0` installé ; modèle final (RF, URL + Contenu sans `random_domain`, 79 colonnes) entraîné sur **tout le train** ; `TreeExplainer` sur 500 URL tirées au hasard ; graphique *beeswarm*.
+- **Pourquoi :** un analyste ne peut rien faire d'une probabilité seule ; SHAP répartit la prédiction de chaque URL entre ses caractéristiques (valeurs de Shapley, théorie des jeux). Positif = pousse vers phishing.
+- **Caractéristiques les plus influentes (importance SHAP moyenne) :**
+
+| Rang | Caractéristique | Couche | Sens de l'effet |
+| --- | --- | --- | --- |
+| 1 | `nb_hyperlinks` | Contenu | **Peu de liens → phishing** (kits minimalistes ; pages légitimes riches) |
+| 2 | `nb_www` | URL | **Pas de `www` → phishing** (signal réel mais facile à contourner) |
+| 3 | `phish_hints` | URL | Mots suspects (`login`, `signin`, `admin`…) → phishing |
+| 4 | `safe_anchor` | Contenu | Faible part d'ancres « vides » (`#`, `javascript`) → phishing (nom trompeur : la colonne mesure le % d'ancres **non sûres**) |
+| 5 | `longest_word_path` | URL | Long jeton dans le chemin (identifiant aléatoire) → phishing |
+| 7 | `domain_in_title` | Contenu | `1` = le domaine **n'est pas** dans le titre → phishing (page qui imite une marque) |
+
+- **Lecture :** les deux couches se mélangent en tête du classement, ce qui est cohérent avec le gain du contenu dans l'ablation (+3,8 points). Aucune caractéristique de popularité. Plusieurs noms de colonnes ont un codage inversé (`domain_in_title`, `safe_anchor`) : il faudra les **traduire** en phrases claires pour l'analyste.
+- **Limite :** les signaux les plus forts (`nb_hyperlinks`, `nb_www`) sont **faciles à contourner** pour un attaquant (ajouter des liens, ajouter `www.`) → à tester dans la partie évasion.
+- **Explications par alerte** (modèle entraîné sur 4 plis, URL du 5e pli jamais vues) :
+
+| URL | Probabilité | Vrai statut | 3 raisons principales | Lecture |
+| --- | --- | --- | --- | --- |
+| `restbetgir1.blogspot.com` | 1,00 | phishing | 14 liens seulement ; pas de `www` ; 7 % de liens internes | Blog de paris illégaux (« restbet giriş » = « connexion restbet ») qui renvoie presque tout vers un autre site |
+| `shadetreetechnology.com/V4/validation/a111…a4` | 0,91 (file de revue) | phishing | jeton de 32 caractères dans le chemin ; idem sur l'URL ; 22 % de chiffres | Site compromis + identifiant hexadécimal de 32 caractères (type MD5), typique des kits |
+| `scenari.software` | 0,83 (**fausse alerte**) | légitime | **0 lien** sur la page ; pas de `www` ; 0 % de liens externes | Page légitime sans liens visibles sans navigateur (probablement rendue en JavaScript) |
+
+- **Format d'alerte PhishGuard** (noms techniques traduits en phrases, codages inversés corrigés, niveaux de `06`) :
+
+```
+🔴 ALERTE HAUTE  (probabilité 1.00)  http://restbetgir1.blogspot.com
+   • seulement 14 lien(s) sur la page
+   • pas de « www » dans l'adresse
+   • 7% seulement des liens restent sur le site
+
+🟠 À REVOIR  (probabilité 0.83)  https://scenari.software/
+   • seulement 0 lien(s) sur la page
+   • pas de « www » dans l'adresse
+   • 0% des liens pointent vers d'autres sites
+```
+
+- **Le tri à deux niveaux joue son rôle :** la fausse alerte (`scenari.software`, 0,83) tombe en **« À REVOIR »**, pas en blocage automatique, et ses raisons (« 0 lien ») orientent l'analyste vers la bonne vérification.
+- **Amélioration possible :** deux raisons peuvent dire la même chose (`longest_word_path` et `longest_words_raw`) ; regrouper les caractéristiques corrélées donnerait 3 raisons vraiment distinctes.
+- **Enseignement :** la fausse alerte vient du même mécanisme que la campagne `pages.dev` : une page **rendue en JavaScript** paraît vide pour `requests`, et « page vide » ressemble à du phishing. Les sites légitimes modernes (applications JavaScript) risquent donc des fausses alertes → limite à documenter.
+
 ---
 
 ## 4. Décisions méthodologiques (à défendre à l'oral)
@@ -265,6 +308,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 - **Collecte live :** cloaking, pages en JavaScript, sites qui disparaissent vite ; un jour de collecte manqué (16/10) ; Tranco contient aussi des sites pour adultes et de piratage (légitimes au sens « non-phishing »).
 - **Traçabilité de Hannousse :** pour quelques URL, les caractéristiques ne correspondent pas exactement à l'URL stockée.
 - **Code de Hannousse :** le code de contenu publié ne correspond pas au CSV, 5 colonnes de contenu sont constantes, `random_domain` n'est pas reproductible.
+- **Pages rendues en JavaScript :** elles paraissent vides (0 lien) et poussent vers « phishing » → fausses alertes possibles sur des sites légitimes modernes (ex. `scenari.software`, 0,83).
 - **Une campagne domine le live :** 45 % du phishing collecté est sur `pages.dev`, rendu en JavaScript (couche contenu aveugle sans navigateur).
 - **Point de fonctionnement SOC :** rappel de 0,61 seulement à 1 % de faux positifs ; précision de 0,40 à prévalence réelle avec ce seuil.
 
@@ -278,7 +322,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | ✅ | ~~Seuil SOC~~ | Bedis | Fait le 18/10 (§3.10) ; conclusion Markdown + commit de `06` à faire. |
 | ✅ | ~~Retirer `random_domain`~~ | Bedis | Fait dans `06` (F1 inchangé). |
 | ✅ | ~~Contenu pour le live~~ | Claude | Analysé : non reproductible → option A (§3.9). |
-| 1 | **SHAP** : 3 raisons par verdict (modèle principal URL + Contenu) | Bedis | Rendre une alerte exploitable par un analyste (explicabilité). |
+| ✅ | ~~SHAP~~ : importance globale, 3 raisons par alerte, phrases + niveau d'alerte (§3.11) ; conclusion Markdown + commit de `07` à faire | Bedis | Rendre une alerte exploitable par un analyste (explicabilité). |
 | 2 | **Modèle live** : RF sur les 52 colonnes URL pures, seuils SOC recalculés de la même façon | Bedis | Le test live porte sur la couche URL. |
 | 3 | **K-Means** sur le phishing (campagnes, ex. `hf*.com`, `pages.dev`) | Bedis | Analyse des campagnes. |
 | 4 | **Évaluation finale (24–27 oct.)** : test verrouillé (une seule fois, seuils 0,81 / 0,93 inclus), test live avec et sans `pages.dev`, McNemar, calibration | Bedis | Le résultat principal du rapport. |
