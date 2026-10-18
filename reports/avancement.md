@@ -430,7 +430,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 
 **Reportés en « perspectives »** (hors délai) : Wazuh, FastAPI, Docker (déploiement), MLflow, collecteur étape 2 (WHOIS/DNS/TLS).
 
-**Collecte :** continuer deux fois par jour jusqu'au 27 octobre au moins, avec `bash src/collector/collect.sh` (Docker Desktop ouvert).
+**Collecte :** **automatique depuis le 18/10** (tâche Windows « PhishGuard collecte », 01:15 et 13:15, rattrapage au démarrage, réveil de veille ; `src/collector/auto_collect.sh` ignore une fenêtre déjà collectée et démarre Docker Desktop si besoin ; journaux dans `data/live/logs/`). Jusqu'au 27 octobre au moins.
 
 ---
 
@@ -443,6 +443,7 @@ Détecter les URL de phishing avec des **algorithmes classiques** (KNN, arbre de
 | Découpage | `notebooks/04_split.ipynb` → `data/processed/train.csv`, `test_LOCKED.csv` (SHA-256 ci-dessus) |
 | Graine aléatoire | `random_state=42` partout |
 | Collecte | `bash src/collector/collect.sh` (URL + pages dans le conteneur ; identifiant Tranco enregistré dans chaque fichier) |
+| Collecte automatique | Tâche Windows créée par `src/collector/schedule_windows.ps1` → `src/collector/auto_collect.sh` |
 | Caractéristiques live | `python -m src.features.build_live` (URL, validées 52/52 contre Hannousse) |
 | Seuils SOC | `notebooks/06_threshold.ipynb` (probabilités hors-pli sur le train) |
 | Modèles | `notebooks/08_live_model.ipynb` → `models/*.joblib` + `thresholds.json` ; `09_kmeans` → `models/kmeans_campaigns.joblib` |
